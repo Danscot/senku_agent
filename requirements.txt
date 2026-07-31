@@ -1,0 +1,16 @@
+# Core
+openai>=1.0.0
+python-dotenv>=1.0.0
+rich>=13.0.0
+
+# Tools
+requests>=2.31.0
+
+# Django (backend)
+django>=4.2
+djangorestframework>=3.14
+django-cors-headers>=4.0
+
+# Testing
+pytest>=7.4
+pytest-django>=4.7

@@ -1,0 +1,66 @@
+{
+  "shell": [
+    {
+      "error_pattern": "error: command not found \u2014 [errno 2] no such file or directory: 'if'",
+      "bad_params": {
+        "cmd": "if command -v hyperframes &> /dev/null; then hyperframes lint my-video 2>&1 || echo \"Lint command failed\"; else echo \"hyperframes CLI not in PATH\"; fi"
+      },
+      "fix_params": {
+        "cmd": "/bin/bash -c 'if command -v hyperframes &> /dev/null; then hyperframes lint my-video 2>&1 || echo \"Lint command failed\"; else echo \"hyperframes CLI not in PATH\"; fi'"
+      },
+      "explanation": "Wrapped the command in /bin/bash -c to execute it through a shell interpreter, since 'if' is a shell builtin not a standalone executable.",
+      "times_applied": 1,
+      "last_seen": "2026-05-08T00:48:05"
+    }
+  ],
+  "file": [
+    {
+      "error_pattern": "error: file '/home/danscot/desktop/mahogara/hyperframes_compositions/my-video' d",
+      "bad_params": {
+        "op": "read",
+        "path": "/home/danscot/Desktop/mahogara/hyperframes_compositions/my-video"
+      },
+      "fix_params": {
+        "op": "list",
+        "path": "/home/danscot/Desktop/mahogara/hyperframes_compositions"
+      },
+      "explanation": "The file path doesn't exist. Changed operation from 'read' to 'list' to inspect the directory contents first and identify the correct filename.",
+      "times_applied": 1,
+      "last_seen": "2026-05-08T00:48:29"
+    }
+  ],
+  "tool:file": [
+    {
+      "error_pattern": "error: file 'test_gemma.py' does not exist.",
+      "bad_params": {
+        "op": "read",
+        "path": "test_gemma.py"
+      },
+      "fix_params": {
+        "op": "list",
+        "path": "."
+      },
+      "explanation": "Since the specified file does not exist, I am listing the contents of the current directory to identify the correct file path.",
+      "times_applied": 1,
+      "last_seen": "2026-07-31T04:28:33"
+    }
+  ],
+  "skill:code_writer": [
+    {
+      "error_pattern": "error: 'instruction' is required \u2014 describe what to write or change.",
+      "bad_params": {
+        "op": "edit",
+        "path": "test_gemma.py",
+        "content": "Updated the prompt string to request a Tic-Tac-Toe game."
+      },
+      "fix_params": {
+        "op": "edit",
+        "path": "test_gemma.py",
+        "instruction": "Update the prompt string to request a Tic-Tac-Toe game."
+      },
+      "explanation": "Added the required 'instruction' field to describe the requested change to the file.",
+      "times_applied": 1,
+      "last_seen": "2026-07-31T04:28:37"
+    }
+  ]
+}
