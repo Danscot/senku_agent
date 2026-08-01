@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from config import MODEL
+from config import MODEL, TOKENS_MEMORY_COMPRESS
 """
 memory/buffer.py
 Sliding-window conversation buffer with LLM-based compression
@@ -54,18 +54,12 @@ Preserve all task outcomes, decisions made, and important facts.
 History:
 {history_text}
 """
-        stream = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400,
-            stream=True,
+        from skills._llm import skill_llm_call
+        new_summary = skill_llm_call(
+            client, MODEL,
+            [{"role": "user", "content": prompt}],
+            max_tokens=TOKENS_MEMORY_COMPRESS,
         )
-        chunks = []
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-        new_summary = "".join(chunks).strip()
 
         if self._summary:
             self._summary = self._summary + "\n\n" + new_summary

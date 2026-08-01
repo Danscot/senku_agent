@@ -13,7 +13,7 @@ Modes:
 from __future__ import annotations
 
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT
+from config import MODEL, PROJECT_ROOT, TOKENS_CODE_REVIEWER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
 
 
 def _safe_extract(resp, default="") -> str:
@@ -116,21 +116,12 @@ Code:
 """
 
     try:
-        stream = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user",   "content": user_prompt},
-            ],
-            max_tokens=2500,
-            stream=True,
+        from skills._llm import skill_llm_call
+        review = skill_llm_call(
+            client, MODEL,
+            [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
+            max_tokens=TOKENS_CODE_REVIEWER,
         )
-        chunks = []
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-        review = "".join(chunks).strip()
     except Exception as e:
         return f"ERROR: LLM call failed — {e}"
 

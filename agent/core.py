@@ -34,6 +34,9 @@ from config import (
     PROJECT_ROOT,
     STAGE_THINK, STAGE_ACT, STAGE_RESPOND, STAGE_COMPRESS,
     parse_stage,
+    THINKING_ENABLED, THINKING_BUDGET,
+    TOKENS_THINK, TOKENS_ACT, TOKENS_RESPOND, TOKENS_COMPRESS,
+    TEMPERATURE_THINK, TEMPERATURE_ACT, TEMPERATURE_RESPOND,
 )
 from memory import ConversationBuffer
 from agent.correction_tracker import (
@@ -485,10 +488,11 @@ class Agent:
         client: OpenAI,
         provider: str,
         model: str,
-        max_tokens: int = 12000,
+        max_tokens: int,
+        temperature: float = 0.0,
         attempt: int = 1,
         max_attempts: int = 1,
-        echo: bool = False,          # if True: print tokens live to console
+        echo: bool = False,
     ) -> str:
         """
         Universal streaming LLM call with structured logging.
@@ -503,12 +507,18 @@ class Agent:
             max_attempts=max_attempts,
         ) as lcl:
             try:
-                stream = client.chat.completions.create(
+                # Build call kwargs — thinking budget injected when enabled
+                call_kwargs: dict = dict(
                     model=model,
                     messages=messages,
                     max_tokens=max_tokens,
+                    temperature=temperature,
                     stream=True,
                 )
+                if THINKING_ENABLED:
+                    call_kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}}
+
+                stream = client.chat.completions.create(**call_kwargs)
 
                 if echo:
                     console.print(f"\n  [{C['accent']}]◆  Agent[/]  ", end="")
@@ -530,40 +540,42 @@ class Agent:
 
     # ── Stage-specific call wrappers ───────────────────────────────────────────
 
-    def _llm_think(self, messages: list[dict], max_tokens: int = 11000, attempt: int = 1) -> str:
+    def _llm_think(self, messages: list[dict], attempt: int = 1) -> str:
         return self._stream(
             messages, stage="think",
             client=self._think_client, provider=self._think_provider, model=self._think_model,
-            max_tokens=max_tokens, attempt=attempt, max_attempts=3,
+            max_tokens=TOKENS_THINK, temperature=TEMPERATURE_THINK,
+            attempt=attempt, max_attempts=3,
         )
 
-    def _llm_act(self, messages: list[dict], max_tokens: int = 3000, attempt: int = 1) -> str:
+    def _llm_act(self, messages: list[dict], attempt: int = 1) -> str:
         return self._stream(
             messages, stage="act",
             client=self._act_client, provider=self._act_provider, model=self._act_model,
-            max_tokens=max_tokens, attempt=attempt, max_attempts=3,
+            max_tokens=TOKENS_ACT, temperature=TEMPERATURE_ACT,
+            attempt=attempt, max_attempts=3,
         )
 
-    def _llm_respond(self, messages: list[dict], max_tokens: int = 12000) -> str:
+    def _llm_respond(self, messages: list[dict]) -> str:
         return self._stream(
             messages, stage="respond",
             client=self._respond_client, provider=self._respond_provider, model=self._respond_model,
-            max_tokens=max_tokens, echo=True,
+            max_tokens=TOKENS_RESPOND, temperature=TEMPERATURE_RESPOND, echo=True,
         )
 
-    def _llm_compress(self, messages: list[dict], max_tokens: int = 4000) -> str:
+    def _llm_compress(self, messages: list[dict]) -> str:
         return self._stream(
             messages, stage="compress",
             client=self._compress_client, provider=self._compress_provider, model=self._compress_model,
-            max_tokens=max_tokens,
+            max_tokens=TOKENS_COMPRESS, temperature=TEMPERATURE_ACT,
         )
 
     # Kept for backward compat (skills/healer call self.client directly)
-    def _llm(self, messages: list[dict], max_tokens: int = 12000) -> str:
-        return self._llm_act(messages, max_tokens)
+    def _llm(self, messages: list[dict], max_tokens: int | None = None) -> str:
+        return self._llm_act(messages)
 
-    def _llm_stream(self, messages: list[dict], max_tokens: int = 12000) -> str:
-        return self._llm_respond(messages, max_tokens)
+    def _llm_stream(self, messages: list[dict], max_tokens: int | None = None) -> str:
+        return self._llm_respond(messages)
 
     # ── Think ───────────────────────────────────────────────────────────────────
 
@@ -834,7 +846,7 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
         messages.append({"role": "user", "content": user_input})
 
         with stage_block("RESPOND", input_text=user_input):
-            result = self._llm_respond(messages, max_tokens=6000)
+            result = self._llm_respond(messages)
             log_stage_done("respond", chars=len(result))
         return result
 
@@ -856,7 +868,7 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
                 {"role": "user",      "content": user_input},
                 {"role": "assistant", "content": f"Tool result:\n{str(result)[:2000]}"},
                 {"role": "user",      "content": "Give your final answer."},
-            ], max_tokens=5000)
+            ])
             log_stage_done("respond", chars=len(answer))
         return answer
 
@@ -918,7 +930,7 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
                 {"role": "user",      "content": user_input},
                 {"role": "assistant", "content": f"Completed steps:\n{results_block}{failure_note}"},
                 {"role": "user",      "content": "Give your final answer."},
-            ], max_tokens=8000)
+            ])
             log_stage_done("respond", chars=len(answer), failed_steps=len(failed_steps))
         return answer
 

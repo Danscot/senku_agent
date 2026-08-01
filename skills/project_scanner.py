@@ -24,7 +24,7 @@ import json
 import time
 import logging
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT
+from config import MODEL, PROJECT_ROOT, TOKENS_PROJECT_SCANNER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
 
 _LOG = logging.getLogger("skill.project_scanner")
 
@@ -226,12 +226,17 @@ If none, return an empty list.
 
     chunks: list[str] = []
     try:
-        stream = client.chat.completions.create(
+        call_kwargs: dict = dict(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=500,
+            max_tokens=TOKENS_PROJECT_SCANNER,
+            temperature=TEMPERATURE_SKILLS,
             stream=True,
         )
+        if THINKING_ENABLED:
+            call_kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}}
+
+        stream = client.chat.completions.create(**call_kwargs)
         for chunk in stream:
             delta = chunk.choices[0].delta.content
             if delta:

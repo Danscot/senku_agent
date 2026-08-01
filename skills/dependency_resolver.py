@@ -14,7 +14,7 @@ import sys
 import json
 import os
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT
+from config import MODEL, PROJECT_ROOT, TOKENS_DEPENDENCY_RESOLVER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
 
 
 def _safe_extract(resp, default="") -> str:
@@ -121,18 +121,12 @@ These packages are outdated in the project. Which ones should be updated urgentl
 {out}
 """
             try:
-                stream = client.chat.completions.create(
-                    model=MODEL,
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=600,
-                    stream=True,
+                from skills._llm import skill_llm_call
+                advice = skill_llm_call(
+                    client, MODEL,
+                    [{"role": "user", "content": prompt}],
+                    max_tokens=TOKENS_DEPENDENCY_RESOLVER,
                 )
-                chunks = []
-                for chunk in stream:
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        chunks.append(delta)
-                advice = "".join(chunks).strip()
                 return f"## Outdated packages\n\n```\n{out}\n```\n\n## Upgrade priority\n\n{advice}"
             except Exception:
                 pass

@@ -38,13 +38,21 @@ def _render_model_config() -> None:
     """Print a table showing which provider+model is assigned to each stage."""
     from rich.table import Table
     from rich import box
+    from config import THINKING_ENABLED, THINKING_BUDGET, TOKENS_THINK, TOKENS_ACT, TOKENS_RESPOND, TOKENS_COMPRESS
 
     console.print(f"  [{C['muted']}]Model config[/]\n")
     table = Table(box=box.SIMPLE, show_header=True, header_style=C["muted"], padding=(0, 2))
-    table.add_column("Stage",    style="dim white",    min_width=10)
-    table.add_column("Provider", style="magenta",      min_width=12)
-    table.add_column("Model",    style="bold white",   min_width=28)
+    table.add_column("Stage",    style="dim white",  min_width=10)
+    table.add_column("Provider", style="magenta",    min_width=12)
+    table.add_column("Model",    style="bold white", min_width=28)
+    table.add_column("Tokens",   style="cyan",       min_width=8)
 
+    stage_tokens = {
+        "think":    TOKENS_THINK,
+        "act":      TOKENS_ACT,
+        "respond":  TOKENS_RESPOND,
+        "compress": TOKENS_COMPRESS,
+    }
     for stage_label, stage_str in [
         ("think",    STAGE_THINK),
         ("act",      STAGE_ACT),
@@ -52,10 +60,16 @@ def _render_model_config() -> None:
         ("compress", STAGE_COMPRESS),
     ]:
         provider, model, _, _ = parse_stage(stage_str)
-        table.add_row(stage_label, provider, model)
+        table.add_row(stage_label, provider, model, str(stage_tokens[stage_label]))
 
     console.print(table)
-    console.print()
+
+    think_status = (
+        f"[bold yellow]ON[/]  budget={THINKING_BUDGET} tokens"
+        if THINKING_ENABLED else
+        "[dim]OFF[/]"
+    )
+    console.print(f"  [{C['muted']}]Thinking :[/]  {think_status}\n")
 
 
 # ── Client factory ────────────────────────────────────────────────────────────
@@ -130,6 +144,7 @@ HELP_TEXT = """
   [green]exit / quit[/]       — quit the agent
   [green]/clear[/]             — clear conversation memory
   [green]/tools[/]             — list available tools & skills
+  [green]/config[/]            — show all LLM token budgets and thinking settings
   [green]/models[/]            — show per-stage model configuration
   [green]/corrections[/]       — show recorded tool corrections
   [green]/scan[/]              — scan project & rebuild structure.md
@@ -163,6 +178,52 @@ def _cmd_tools(agent: Agent) -> None:
         for m in enabled_mcp:
             console.print(f"  [blue]·[/] [white]{m['name']}[/]  [dim]{m['description']}[/]")
     console.print()
+
+
+def _cmd_config() -> None:
+    from rich.table import Table
+    from rich import box
+    from config import (
+        THINKING_ENABLED, THINKING_BUDGET,
+        TOKENS_THINK, TOKENS_ACT, TOKENS_RESPOND, TOKENS_COMPRESS,
+        TOKENS_CODE_WRITER, TOKENS_CODE_REVIEWER, TOKENS_PROJECT_SCANNER,
+        TOKENS_TEST_RUNNER, TOKENS_DEPENDENCY_RESOLVER, TOKENS_MEMORY_COMPRESS,
+        TEMPERATURE_THINK, TEMPERATURE_ACT, TEMPERATURE_RESPOND, TEMPERATURE_SKILLS,
+    )
+
+    console.print(f"\n  [bold cyan]◆  LLM Configuration[/]\n")
+
+    # Thinking
+    think_status = (
+        f"[bold yellow]ENABLED[/]  budget = {THINKING_BUDGET} tokens"
+        if THINKING_ENABLED else "[dim]DISABLED[/]"
+    )
+    console.print(f"  [dim]Thinking     :[/]  {think_status}\n")
+
+    # Token budgets
+    t = Table(box=box.SIMPLE, show_header=True, header_style=C["muted"], padding=(0, 2))
+    t.add_column("Call site",           style="white",    min_width=26)
+    t.add_column("Max tokens",          style="cyan",     min_width=12)
+    t.add_column("Temperature",         style="magenta",  min_width=12)
+    t.add_column("Env var to override", style="dim white",min_width=28)
+
+    rows = [
+        ("think stage",          TOKENS_THINK,              TEMPERATURE_THINK,   "TOKENS_THINK / TEMPERATURE_THINK"),
+        ("act stage",            TOKENS_ACT,                TEMPERATURE_ACT,     "TOKENS_ACT / TEMPERATURE_ACT"),
+        ("respond stage",        TOKENS_RESPOND,            TEMPERATURE_RESPOND, "TOKENS_RESPOND / TEMPERATURE_RESPOND"),
+        ("compress stage",       TOKENS_COMPRESS,           TEMPERATURE_ACT,     "TOKENS_COMPRESS"),
+        ("skill: code_writer",   TOKENS_CODE_WRITER,        TEMPERATURE_SKILLS,  "TOKENS_CODE_WRITER"),
+        ("skill: code_reviewer", TOKENS_CODE_REVIEWER,      TEMPERATURE_SKILLS,  "TOKENS_CODE_REVIEWER"),
+        ("skill: project_scan",  TOKENS_PROJECT_SCANNER,    TEMPERATURE_SKILLS,  "TOKENS_PROJECT_SCANNER"),
+        ("skill: test_runner",   TOKENS_TEST_RUNNER,        TEMPERATURE_SKILLS,  "TOKENS_TEST_RUNNER"),
+        ("skill: dep_resolver",  TOKENS_DEPENDENCY_RESOLVER,TEMPERATURE_SKILLS,  "TOKENS_DEPENDENCY_RESOLVER"),
+        ("memory: compress",     TOKENS_MEMORY_COMPRESS,    TEMPERATURE_SKILLS,  "TOKENS_MEMORY_COMPRESS"),
+    ]
+    for name, tok, temp, env in rows:
+        t.add_row(name, str(tok), str(temp), env)
+
+    console.print(t)
+    console.print(f"  [dim]Set any env var in your .env to override. Restart the agent to apply.[/]\n")
 
 
 def _cmd_models() -> None:
@@ -243,6 +304,10 @@ def main() -> None:
 
         if user_input.lower() == "/tools":
             _cmd_tools(agent)
+            continue
+
+        if user_input.lower() == "/config":
+            _cmd_config()
             continue
 
         if user_input.lower() == "/models":

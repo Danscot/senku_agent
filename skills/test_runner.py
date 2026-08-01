@@ -13,7 +13,7 @@ import subprocess
 import sys
 import os
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT
+from config import MODEL, PROJECT_ROOT, TOKENS_TEST_RUNNER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
 
 
 def _safe_extract(resp, default="") -> str:
@@ -156,18 +156,12 @@ Provide:
 """
 
     try:
-        stream = client.chat.completions.create(
-            model=MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=2000,
-            stream=True,
+        from skills._llm import skill_llm_call
+        analysis = skill_llm_call(
+            client, MODEL,
+            [{"role": "user", "content": prompt}],
+            max_tokens=TOKENS_TEST_RUNNER,
         )
-        chunks = []
-        for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-        analysis = "".join(chunks).strip()
     except Exception as e:
         analysis = f"(LLM analysis failed: {e})"
 
