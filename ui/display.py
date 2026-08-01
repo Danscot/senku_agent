@@ -163,7 +163,6 @@ def show_step_start(step: dict):
 def show_step_result(result: str, error: bool = False):
     color = C["error"] if error else C["result"]
     icon  = STATUS_ICONS["error"] if error else STATUS_ICONS["done"]
-    # Truncate long results for display
     preview = result[:300] + "…" if len(result) > 300 else result
     console.print(
         Panel(
@@ -184,6 +183,50 @@ def show_tool_call(tool: str, inp: dict):
     console.print(
         f"  [{C['tool']}]{icon}  {tool}[/]  [{C['muted']}]{safe_inp}[/]"
     )
+
+
+# ── Live elapsed timer ────────────────────────────────────────────────────────
+from contextlib import contextmanager
+from rich.live  import Live
+from rich.text  import Text
+import time as _time
+
+
+@contextmanager
+def live_task(label: str):
+    """
+    Context manager that shows a spinner with a live-ticking elapsed clock.
+
+    Usage:
+        with live_task("Scanning files"):
+            do_work()
+
+    Renders a line like:
+        ⠸  Scanning files  00:04
+    which updates every 0.1 s and clears when done.
+    """
+    t0 = _time.monotonic()
+
+    def _render() -> Text:
+        elapsed = _time.monotonic() - t0
+        m, s    = divmod(int(elapsed), 60)
+        tick    = ["⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"][int(elapsed * 10) % 10]
+        t = Text()
+        t.append(f"  {tick}  ", style=C["accent"])
+        t.append(f"{label}", style=C["muted"])
+        t.append(f"  {m:02d}:{s:02d}", style="bold cyan")
+        return t
+
+    with Live(_render(), console=console, refresh_per_second=10, transient=True) as live:
+        try:
+            yield live
+        finally:
+            elapsed = _time.monotonic() - t0
+            m, s    = divmod(int(elapsed), 60)
+            console.print(
+                f"  [{C['accent']}]✔[/]  [{C['muted']}]{label}[/]"
+                f"  [bold cyan]{m:02d}:{s:02d}[/]"
+            )
 
 
 # ── Spinners / progress ───────────────────────────────────────────────────────

@@ -43,7 +43,7 @@ from agent.healer import try_heal
 from ui import (
     C, console,
     show_mode, show_plan, show_step_start, show_step_result,
-    show_tool_call, show_error, show_response, spinner,
+    show_tool_call, show_error, show_response, spinner, live_task,
     show_thought, show_thinking_header, show_thinking_footer,
     show_gap_report, show_clarify,
 )
@@ -95,12 +95,16 @@ def _is_obvious_chat(text: str) -> bool:
 
 def _extract_json(text: str) -> dict | list | None:
     text = text.strip()
+    # Strip <thought>...</thought> blocks emitted by reasoning models before JSON
+    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL).strip()
+    # Strip markdown fences
     text = re.sub(r"^```(?:json)?\s*", "", text)
     text = re.sub(r"\s*```$", "", text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         pass
+    # Fall back to finding the first {...} or [...] block in the remaining text
     for pattern in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
         m = re.search(pattern, text)
         if m:
@@ -172,15 +176,22 @@ def _emit_thoughts(thoughts: list[dict]) -> None:
 # ── Think system prompt ────────────────────────────────────────────────────────
 
 _THINK_SYSTEM = """\
-You are a coding agent's reasoning core, specialized in Django (backend) and HTML/CSS/JavaScript (frontend).
+You are a coding agent's reasoning core. You build things with the right tool for the job.
+
+DEFAULT STACK (when the user hasn't specified):
+  - Websites, landing pages, simple sites → plain HTML + CSS + JavaScript
+  - Only reach for Django/React/Vue when the user EXPLICITLY mentions it,
+    OR when the task clearly requires a backend (auth, database, API, forms that save data).
+  - "Make me a website" = HTML/CSS/JS. Full stop. Do NOT scaffold Django.
+  - "Make me a landing page" = single HTML file + CSS. No framework.
+  - "Make me a web app with login" = ask first (clarify mode).
 
 Your job: In ONE JSON response, analyze the coding request, decide execution mode, and produce the full plan.
 
 PROJECT ROOT: {project_root}
 All file paths in tool params MUST be absolute paths under the project root above, OR relative paths \
 that will be resolved relative to it. Shell commands run with cwd set to this root automatically.
-When creating a new project (e.g. "make me a django app"), use this root as the target directory \
-unless the user specifies otherwise — you can scaffold directly into it or create a subdirectory.
+When creating a new project, use this root as the target directory unless the user specifies otherwise.
 
 {catalogue}
 
@@ -238,12 +249,14 @@ MODE RULES:
 
 CLARIFY RULES — when to ask vs when to just act:
   ASK when genuinely ambiguous and the wrong guess wastes significant work:
-    ✔ "website" with no stack hint → ask: plain HTML/CSS/JS or Django/React?
+    ✔ "website" with backend signals (login, database, forms) → ask: plain HTML or Django/React?
     ✔ "add auth" → ask: session-based, JWT, or OAuth?
     ✔ "deploy" → ask: local, VPS, Docker, or cloud?
-  DO NOT ASK for things you can infer or that don't affect the output:
+  DO NOT ASK when the default is obvious:
+    ✗ "make me a landing page" → just build HTML/CSS/JS, no question needed
+    ✗ "make me a website" → HTML/CSS/JS is the default, build it
     ✗ File names you can choose sensibly yourself
-    ✗ Minor style details (you can pick a reasonable default)
+    ✗ Minor style details (pick a reasonable default)
     ✗ Anything obvious from context or prior conversation
   MAX 2 questions per clarify response. Each question MUST have 2-4 short options.
   Prefer acting with a sensible default over asking about trivial details.
@@ -302,6 +315,130 @@ def _make_client(stage_str: str) -> tuple[OpenAI, str, str]:
         api_key = "placeholder"
     client = OpenAI(base_url=base_url, api_key=api_key)
     return client, provider, model
+
+
+# ── Structure.md auto-update helpers ──────────────────────────────────────────
+
+# Tools/skills that write files to disk — trigger a structure.md refresh
+_FILE_WRITING_TOOLS = {
+    "tool:file", "skill:code_writer", "skill:code_reviewer",
+    "tool:django", "tool:shell",
+}
+
+def _step_writes_files(tool_key: str, params: dict) -> bool:
+    """Return True if this step likely wrote new files to disk."""
+    key = tool_key.strip()
+
+    # skill:code_writer always writes
+    if key == "skill:code_writer":
+        return True
+
+    # tool:file with op=write/create
+    if key == "tool:file":
+        return params.get("op", "read") in ("write", "create", "append")
+
+    # tool:shell — heuristic: cmd contains redirection or file-creating commands
+    if key == "tool:shell":
+        cmd = params.get("cmd", "")
+        return any(tok in cmd for tok in (">", "touch", "mkdir", "cp ", "mv ", "tee "))
+
+    # tool:django scaffold / startapp always creates directories and files
+    if key == "tool:django":
+        return params.get("op", "") in ("scaffold", "startapp")
+
+    return False
+
+
+def _update_structure_md(root: str) -> None:
+    """
+    Lightweight structure.md updater that just appends newly discovered paths
+    without re-running the full LLM analysis scan. Reads current structure.md,
+    walks the directory, and adds entries for files not yet listed.
+    """
+    from pathlib import Path as _Path
+
+    struct_path = _Path(root) / "structure.md"
+    existing_md = struct_path.read_text(encoding="utf-8") if struct_path.exists() else ""
+
+    # Collect all current source + media files
+    code_exts = {
+        ".py", ".js", ".ts", ".jsx", ".tsx", ".html", ".css", ".scss",
+        ".json", ".yaml", ".yml", ".toml", ".md", ".sh",
+    }
+    media_exts = {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico",
+        ".woff", ".woff2", ".ttf", ".mp3", ".mp4", ".pdf", ".sqlite", ".db",
+    }
+    skip_dirs = {
+        ".venv", "venv", "env", "__pycache__", ".git", "node_modules",
+        "migrations", "staticfiles", "media", "dist", "build",
+    }
+
+    new_code:  list[str] = []
+    new_media: list[str] = []
+
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [
+            d for d in dirnames
+            if d not in skip_dirs and not d.startswith(".")
+        ]
+        for fname in filenames:
+            fpath  = Path(dirpath) / fname
+            try:
+                rel = str(fpath.relative_to(root))
+            except ValueError:
+                continue
+
+            # Skip if already in structure.md
+            if f"`{rel}`" in existing_md:
+                continue
+
+            ext = fpath.suffix.lower()
+            if ext in code_exts:
+                new_code.append(rel)
+            elif ext in media_exts:
+                new_media.append(rel)
+
+    if not new_code and not new_media:
+        return  # nothing new to add
+
+    additions: list[str] = []
+    for rel in sorted(new_code):
+        additions.append(f"## `{rel}`")
+        additions.append("**Purpose:** *(newly created — run /scan for full analysis)*")
+        additions.append("**Imports:** *(unknown)*")
+        additions.append("**Imported by:** *(unknown)*")
+        additions.append("")
+        additions.append("---")
+        additions.append("")
+
+    if new_media:
+        # Find the existing media section or append a new one
+        media_header = "## 🗂 Media & Binary Assets"
+        media_lines  = [f"- `{rel}`" for rel in sorted(new_media)]
+        if media_header in existing_md:
+            # Insert after the header line
+            existing_md = existing_md.replace(
+                media_header + "\n",
+                media_header + "\n" + "\n".join(media_lines) + "\n",
+            )
+            additions_text = "\n".join(additions)
+            struct_path.write_text(
+                existing_md.rstrip() + ("\n\n" + additions_text if additions_text else ""),
+                encoding="utf-8",
+            )
+            return
+        else:
+            additions.append(media_header)
+            additions.append("> Not analysed — catalogued by path only.")
+            additions.append("")
+            additions.extend(media_lines)
+            additions.append("")
+
+    struct_path.write_text(
+        existing_md.rstrip() + "\n\n" + "\n".join(additions),
+        encoding="utf-8",
+    )
 
 
 # ── Agent ──────────────────────────────────────────────────────────────────────
@@ -592,39 +729,53 @@ class Agent:
         return p
 
     def _dispatch_raw(self, tool_key: str, params: dict) -> Any:
-        try:
-            # Always inject project context so tools operate in the right place
-            params = self._inject_project_root(params)
+        # Skills that do their own rich streaming output must not be wrapped
+        # in live_task — the Live context would fight with their console prints.
+        _NO_LIVE_TIMER = {"project_scanner", "code_writer"}
+        skill_name = tool_key[len("skill:"):] if tool_key.startswith("skill:") else ""
+        use_timer  = skill_name not in _NO_LIVE_TIMER
 
-            if tool_key.startswith("skill:"):
-                name = tool_key[len("skill:"):]
-                defn = skill_registry.get(name)
+        label = tool_key.replace("tool:", "").replace("skill:", "").replace("mcp:", "")
+
+        def _run():
+            try:
+                params_injected = self._inject_project_root(params)
+
+                if tool_key.startswith("skill:"):
+                    name = tool_key[len("skill:"):]
+                    defn = skill_registry.get(name)
+                    if not defn:
+                        return f"ERROR: skill '{name}' not found."
+                    fn = defn["fn"]
+                    return fn(params_injected, self.client) if defn.get("needs_client") else fn(params_injected)
+
+                if tool_key.startswith("mcp:"):
+                    name = tool_key[len("mcp:"):]
+                    defn = mcp_registry.get(name)
+                    if not defn:
+                        return f"ERROR: mcp server '{name}' not enabled."
+                    return defn["fn"](params_injected)
+
+                name = tool_key.replace("tool:", "").strip()
+                if name in ("chat", "think", "reason", "none", ""):
+                    return (
+                        f"ERROR: '{tool_key}' is not a real tool. "
+                        f"Available: {', '.join(tool_registry.REGISTRY.keys())}"
+                    )
+                defn = tool_registry.get(name)
                 if not defn:
-                    return f"ERROR: skill '{name}' not found."
-                fn = defn["fn"]
-                return fn(params, self.client) if defn.get("needs_client") else fn(params)
+                    available = ", ".join(tool_registry.REGISTRY.keys())
+                    return f"ERROR: tool '{name}' not found. Available: {available}"
+                return defn["fn"](params_injected)
 
-            if tool_key.startswith("mcp:"):
-                name = tool_key[len("mcp:"):]
-                defn = mcp_registry.get(name)
-                if not defn:
-                    return f"ERROR: mcp server '{name}' not enabled."
-                return defn["fn"](params)
+            except Exception as e:
+                return f"ERROR: exception in {tool_key} — {e}"
 
-            name = tool_key.replace("tool:", "").strip()
-            if name in ("chat", "think", "reason", "none", ""):
-                return (
-                    f"ERROR: '{tool_key}' is not a real tool. "
-                    f"Available: {', '.join(tool_registry.REGISTRY.keys())}"
-                )
-            defn = tool_registry.get(name)
-            if not defn:
-                available = ", ".join(tool_registry.REGISTRY.keys())
-                return f"ERROR: tool '{name}' not found. Available: {available}"
-            return defn["fn"](params)
-
-        except Exception as e:
-            return f"ERROR: exception in {tool_key} — {e}"
+        if use_timer:
+            with live_task(label):
+                return _run()
+        else:
+            return _run()
 
     def _ask_llm_fix(self, tool_key: str, params: dict, error: str) -> dict | None:
         prompt = f"""A tool call failed. Suggest corrected parameters.
@@ -658,38 +809,22 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
     # ── CHECK phase ───────────────────────────────────────────────────────────
 
     def _check_step(self, step: dict, result: str) -> bool:
-        # Hard failure — no need to ask the LLM
-        is_error = isinstance(result, str) and result.startswith("ERROR")
-        if is_error:
-            return False
-
-        check_hint = step.get("check", "")
-        if not check_hint:
-            # No explicit success criteria → pass if no ERROR prefix
-            return True
-
-        # Only hit the LLM when there's a nuanced check AND the tool didn't hard-fail
-        prompt = f"""Did this tool step succeed?
-
-Step description: {step.get('description', '')}
-Success criteria: {check_hint}
-Result (first 800 chars): {result[:800]}
-
-Reply with ONLY "yes" or "no".
-"""
-        try:
-            raw = self._llm_act([{"role": "user", "content": prompt}], max_tokens=10)
-            return raw.strip().lower().startswith("y")
-        except Exception:
-            return True  # benefit of the doubt when check call itself fails
+        """
+        A step passes if its result does not start with ERROR.
+        We deliberately avoid asking the LLM to judge success — it's unreliable
+        because it can flag a step as failed just because a *prior* step failed,
+        not because the current tool actually returned bad output.
+        The result string itself is ground truth: tools always prefix errors with ERROR:.
+        """
+        return not (isinstance(result, str) and result.strip().startswith("ERROR"))
 
     # ── Mode handlers ──────────────────────────────────────────────────────────
 
     def _handle_chat(self, user_input: str) -> str:
         structure_md = _load_structure_md(self.project_root)
         system = (
-            "You are Senku, a coding agent with 10 billion percent confidence in science and code. "
-            "You are specialized in Django (backend) and HTML/CSS/JavaScript (frontend). "
+            "You are Senku, a coding agent that uses the right tool for the job. "
+            "Default to plain HTML/CSS/JS unless the user explicitly asks for a framework. "
             "Be concise, technically precise, and occasionally reference your scientific reasoning.\n\n"
             f"Project root: {self.project_root}\n"
             + (f"Project structure:\n{structure_md}" if structure_md else "No structure.md yet.")
@@ -751,7 +886,16 @@ Reply with ONLY "yes" or "no".
                 failed_steps.append(
                     f"Step {step['id']} ({step.get('description', tool_key)}): {str(result)[:300]}"
                 )
-                log_error(f"Step {step['id']} check failed — continuing to synthesize")
+                log_error(f"Step {step['id']} failed — continuing to synthesize")
+
+            # ── Auto-update structure.md after any successful file/code write ──
+            if step_ok and _step_writes_files(tool_key, params):
+                try:
+                    _update_structure_md(self.project_root)
+                    self._rebuild_think_system()
+                    log_info("structure.md updated — new files registered")
+                except Exception as e:
+                    log_warning(f"structure.md auto-update failed: {e}")
 
             step_results[step["id"]] = str(result)
 

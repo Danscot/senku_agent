@@ -177,10 +177,7 @@ def _cmd_scan(agent: Agent) -> None:
         return
 
     console.print(f"  [dim]Scanning '{agent.project_root}'…[/]\n")
-    from ui import spinner
-    with spinner("Scanning project files"):
-        result = scanner["fn"]({"root": agent.project_root}, agent.client)
-
+    result = scanner["fn"]({"root": agent.project_root}, agent.client)
     console.print(f"\n  [green]{result[:400]}[/]\n")
     agent._rebuild_think_system()
 

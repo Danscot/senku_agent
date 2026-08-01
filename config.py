@@ -59,10 +59,10 @@ PROVIDER_KEYS: dict[str, str] = {
 def _stage(env_var: str, default: str) -> str:
     return os.getenv(env_var, default)
 
-STAGE_THINK:    str = _stage("STAGE_THINK",    "gemini:gemini-3.1-flash-lite")
-STAGE_ACT:      str = _stage("STAGE_ACT",      "gemini:gemini-3.1-flash-lite")
-STAGE_RESPOND:  str = _stage("STAGE_RESPOND",  "gemini:gemini-3.1-flash-lite")
-STAGE_COMPRESS: str = _stage("STAGE_COMPRESS", "gemini:gemini-3.1-flash-lite")
+STAGE_THINK:    str = _stage("STAGE_THINK",    "nvidia:moonshotai/kimi-k2-thinking")
+STAGE_ACT:      str = _stage("STAGE_ACT",      "nvidia:moonshotai/kimi-k2-thinking")
+STAGE_RESPOND:  str = _stage("STAGE_RESPOND",  "nvidia:moonshotai/kimi-k2-thinking")
+STAGE_COMPRESS: str = _stage("STAGE_COMPRESS", "nvidia:moonshotai/kimi-k2-thinking")
 
 # ── Legacy single-model shim (backward compat) ────────────────────────────────
 # If AGENT_MODEL is set it overrides all stages (old behaviour preserved).

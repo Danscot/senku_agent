@@ -37,6 +37,18 @@ _CODE_EXTS = {
     ".sh", ".dockerfile",
 }
 
+# Media/binary files — catalogued by path only, never sent to the LLM for analysis
+_MEDIA_EXTS = {
+    # Images
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".ico", ".bmp", ".tiff",
+    # Fonts
+    ".woff", ".woff2", ".ttf", ".eot", ".otf",
+    # Audio / video
+    ".mp3", ".mp4", ".wav", ".ogg", ".webm", ".avi", ".mov",
+    # Documents / data blobs
+    ".pdf", ".zip", ".tar", ".gz", ".sqlite", ".db",
+}
+
 # ── Directories to never recurse into ─────────────────────────────────────────
 _SKIP_DIRS: set[str] = {
     ".venv", "venv", "env", ".env",
@@ -143,6 +155,25 @@ def _collect_files(root: str) -> list[Path]:
     return sorted(collected)[:_MAX_FILES]
 
 
+def _collect_media(root: str) -> list[Path]:
+    """
+    Walk the project tree and return media/binary files.
+    These are catalogued by path only — never read or sent to the LLM.
+    """
+    root_path = Path(root)
+    collected = []
+
+    for dirpath, dirnames, filenames in os.walk(root_path):
+        dirnames[:] = [d for d in dirnames if not _should_skip_dir(d)]
+
+        for fname in filenames:
+            fpath = Path(dirpath) / fname
+            if fpath.suffix.lower() in _MEDIA_EXTS:
+                collected.append(fpath)
+
+    return sorted(collected)
+
+
 def _read_truncated(fpath: Path) -> str:
     try:
         text = fpath.read_text(encoding="utf-8", errors="replace")
@@ -212,8 +243,19 @@ If none, return an empty list.
         console.print()
 
         raw = "".join(chunks).strip()
+
+        # Strip <thought>...</thought> blocks (some models emit chain-of-thought before JSON)
+        raw = re.sub(r"<thought>.*?</thought>", "", raw, flags=re.DOTALL).strip()
+
+        # Strip markdown fences
         raw = re.sub(r"^```(?:json)?\s*", "", raw)
         raw = re.sub(r"\s*```$", "", raw)
+
+        # Advance to the first { in case any prose still precedes the JSON
+        brace = raw.find("{")
+        if brace > 0:
+            raw = raw[brace:]
+
         data = json.loads(raw)
         data["path"] = rel
 
@@ -256,6 +298,7 @@ def _build_imported_by(analyses: list[dict]) -> dict[str, list[str]]:
 def _render_structure_md(
     analyses: list[dict],
     imported_by: dict[str, list[str]],
+    media_files: list[Path],
     root: str,
     project_name: str,
 ) -> str:
@@ -303,6 +346,27 @@ def _render_structure_md(
         lines.append("---")
         lines.append("")
 
+    # ── Media / binary asset catalogue ────────────────────────────────────────
+    if media_files:
+        lines.append("## 🗂 Media & Binary Assets")
+        lines.append("> Not analysed — catalogued by path only for reference.")
+        lines.append("")
+        root_path = Path(root)
+        for mf in media_files:
+            try:
+                rel  = str(mf.relative_to(root_path))
+                size = mf.stat().st_size
+                size_str = (
+                    f"{size / 1024:.1f} KB" if size < 1_048_576
+                    else f"{size / 1_048_576:.1f} MB"
+                )
+            except Exception:
+                rel, size_str = str(mf), "?"
+            lines.append(f"- `{rel}`  ({size_str})")
+        lines.append("")
+        lines.append("---")
+        lines.append("")
+
     return "\n".join(lines)
 
 
@@ -322,12 +386,18 @@ def run(params: dict, client) -> str:
 
     # ── Discovery phase ───────────────────────────────────────────────────────
     console.print(f"\n  [dim cyan]⊕[/]  [dim]Collecting files in[/] [white]{root}[/] …")
-    files = _collect_files(root)
-    if not files:
+    files       = _collect_files(root)
+    media_files = _collect_media(root)
+
+    if not files and not media_files:
         return f"ERROR: no source files found in '{root}'."
 
     total = len(files)
-    console.print(f"  [dim]  Found [bold white]{total}[/] files to analyse.[/]\n")
+    console.print(
+        f"  [dim]  Found [bold white]{total}[/] source files"
+        f"{f' + [bold white]{len(media_files)}[/] media assets' if media_files else ''}"
+        f" to process.[/]\n"
+    )
 
     # ── Per-file log table (printed as we go) ─────────────────────────────────
     #   We print one line per file as it completes so the user sees live progress.
@@ -372,7 +442,7 @@ def run(params: dict, client) -> str:
     # ── Build graph & write output ─────────────────────────────────────────────
     console.print(f"\n  [dim]Building dependency graph…[/]")
     imported_by = _build_imported_by(results)
-    md          = _render_structure_md(results, imported_by, root, project_name)
+    md          = _render_structure_md(results, imported_by, media_files, root, project_name)
 
     try:
         Path(output_path).write_text(md, encoding="utf-8")
@@ -384,15 +454,23 @@ def run(params: dict, client) -> str:
 
     console.print(
         f"\n  [bright_green]◆[/]  Scan complete — "
-        f"[white]{ok}[/] analysed, [{'bold red' if failed else 'dim'}]{len(failed)}[/] failed  "
-        f"[dim cyan]({total_elapsed:.1f}s)[/]\n"
+        f"[white]{ok}[/] analysed, [{'bold red' if failed else 'dim'}]{len(failed)}[/] failed"
+        f"{f', [white]{len(media_files)}[/] media assets catalogued' if media_files else ''}"
+        f"  [dim cyan]({total_elapsed:.1f}s)[/]\n"
     )
 
+    media_summary = (
+        f"\n\nMedia assets ({len(media_files)}):\n" +
+        "\n".join(f"  - {mf.relative_to(root)}" for mf in media_files)
+    ) if media_files else ""
+
     return (
-        f"✔ Scanned {len(results)} files in '{root}' ({total_elapsed:.1f}s).\n"
-        f"✔ Dependency graph written to '{output_path}'.\n\n"
+        f"✔ Scanned {len(results)} source files in '{root}' ({total_elapsed:.1f}s).\n"
+        f"✔ Dependency graph written to '{output_path}'.\n"
+        f"✔ {len(media_files)} media assets catalogued (paths only).\n\n"
         f"Summary:\n" +
-        "\n".join(f"  - {r['path']}: {r['purpose']}" for r in results)
+        "\n".join(f"  - {r['path']}: {r['purpose']}" for r in results) +
+        media_summary
     )
 
 
