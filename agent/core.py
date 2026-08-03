@@ -34,11 +34,11 @@ from config import (
     PROJECT_ROOT,
     STAGE_THINK, STAGE_ACT, STAGE_RESPOND, STAGE_COMPRESS,
     parse_stage,
-    THINKING_ENABLED, THINKING_BUDGET,
     TOKENS_THINK, TOKENS_ACT, TOKENS_RESPOND, TOKENS_COMPRESS,
     TEMPERATURE_THINK, TEMPERATURE_ACT, TEMPERATURE_RESPOND,
 )
 from memory import ConversationBuffer
+from agent.thinking import build_thinking_kwargs, extract_chunk, strip_thought_tags
 from agent.correction_tracker import (
     find_correction, record_correction, describe_corrections,
 )
@@ -497,6 +497,11 @@ class Agent:
         """
         Universal streaming LLM call with structured logging.
         All internal + user-visible calls go through here.
+
+        Note on thinking models (Gemma-4, QwQ, DeepSeek-R1, Kimi-K2):
+          These models emit <thought>...</thought> blocks by default — no API
+          param is needed or sent. THINKING_ENABLED only affects token budgets
+          and output stripping, never the request payload.
         """
         with LLMCallLogger(
             stage,
@@ -507,33 +512,45 @@ class Agent:
             max_attempts=max_attempts,
         ) as lcl:
             try:
-                # Build call kwargs — thinking budget injected when enabled
-                call_kwargs: dict = dict(
+                thinking_kwargs = build_thinking_kwargs(provider, model)
+                stream = client.chat.completions.create(
                     model=model,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
                     stream=True,
+                    **thinking_kwargs,
                 )
-                if THINKING_ENABLED:
-                    call_kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}}
-
-                stream = client.chat.completions.create(**call_kwargs)
 
                 if echo:
                     console.print(f"\n  [{C['accent']}]◆  Agent[/]  ", end="")
 
+                reasoning_buf: list[str] = []
+                content_buf:   list[str] = []
+
                 for chunk in stream:
-                    delta = chunk.choices[0].delta.content
-                    if delta:
-                        lcl.on_chunk(delta)
+                    content, reasoning = extract_chunk(chunk)
+
+                    if reasoning:
+                        # Reasoning tokens — dim display, not part of the answer
+                        reasoning_buf.append(reasoning)
+                        console.print(f"[dim]{reasoning}[/]", end="", highlight=False)
+
+                    if content:
+                        if reasoning_buf and not content_buf:
+                            # First content token after reasoning — add a separator
+                            console.print()
+                        content_buf.append(content)
+                        lcl.on_chunk(content)
                         if echo:
-                            console.print(f"[{C['agent']}]{delta}[/]", end="", highlight=False)
+                            console.print(f"[{C['agent']}]{content}[/]", end="", highlight=False)
 
                 if echo:
                     console.print("\n")
 
-                return lcl.finish()
+                # Strip any leftover thought tags folded into content
+                raw = lcl.finish()
+                return strip_thought_tags(raw)
 
             except Exception as exc:
                 return lcl.finish(error=str(exc))
@@ -721,23 +738,19 @@ class Agent:
 
     def _inject_project_root(self, params: dict) -> dict:
         """
-        Inject project_root into params so tools/skills always operate
-        in the correct project directory rather than the agent's own cwd.
-
-        Rules:
-          - shell/git tools: set 'cwd' if not already provided
-          - file/code tools:  set 'root' if not already provided
-          - all tools:        always inject 'project_root' as a hint
+        Inject project_root, cwd, root, and provider into params so tools/skills
+        always operate in the correct project directory and use the right
+        thinking param format for their provider.
         """
         p = dict(params)
         root = self.project_root
         p.setdefault("project_root", root)
-        # shell + git tools use 'cwd' for subprocess working directory
         if "cwd" not in p:
             p["cwd"] = root
-        # code_writer, project_scanner, etc. use 'root' for structure.md lookup
         if "root" not in p:
             p["root"] = root
+        # Let skills know which provider they're running on (for thinking kwargs)
+        p.setdefault("provider", self._think_provider)
         return p
 
     def _dispatch_raw(self, tool_key: str, params: dict) -> Any:

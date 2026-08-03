@@ -13,7 +13,7 @@ Modes:
 from __future__ import annotations
 
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT, TOKENS_CODE_REVIEWER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
+from config import MODEL, PROJECT_ROOT, TOKENS_CODE_REVIEWER, TEMPERATURE_SKILLS
 
 
 def _safe_extract(resp, default="") -> str:
@@ -121,6 +121,7 @@ Code:
             client, MODEL,
             [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
             max_tokens=TOKENS_CODE_REVIEWER,
+            provider=params.get("provider", ""),
         )
     except Exception as e:
         return f"ERROR: LLM call failed — {e}"

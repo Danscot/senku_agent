@@ -90,20 +90,18 @@ MODEL: str = _LEGACY_MODEL or STAGE_THINK.split(":", 1)[-1]
 # ════════════════════════════════════════════════════════════════════════════════
 #  THINKING / CHAIN-OF-THOUGHT
 #
-#  Some models (Gemma-4, QwQ, DeepSeek-R1, Kimi-K2) emit a <think> or
-#  <thought> block before their JSON. This section controls:
+#  THINKING_ENABLED controls:
+#    1. Token budgets — thinking models need larger budgets because reasoning
+#       consumes tokens before the actual answer starts.
+#    2. NVIDIA-only: sends extra_body.chat_template_kwargs to enable thinking
+#       on models like QwQ-32B, DeepSeek-R1, Kimi-K2, GLM-5.2.
 #
-#    THINKING_ENABLED   — whether to request extended thinking budget from
-#                         models that support it via an explicit API param.
-#                         When False the agent still strips <thought> blocks
-#                         from outputs (because some models think by default),
-#                         but no thinking budget is sent in the request.
+#  Gemini / Gemma-4 think by DEFAULT through the OpenAI-compat shim.
+#  No extra param is sent — the shim rejects any extra_body thinking fields.
+#  <thought> blocks are always stripped from output regardless of this flag.
 #
-#    THINKING_BUDGET    — token budget for the thinking phase (only used when
-#                         THINKING_ENABLED=True and the model supports it).
-#                         Gemma-4 / QwQ typically need 2000–8000 here.
-#
-#  Set THINKING_ENABLED=false in .env to disable for classic/fast models.
+#  Set THINKING_ENABLED=false when using non-thinking models (gemini-flash,
+#  gpt-4o, llama-3) to get tighter token budgets.
 # ════════════════════════════════════════════════════════════════════════════════
 
 THINKING_ENABLED: bool = os.getenv("THINKING_ENABLED", "true").lower() in ("1", "true", "yes")

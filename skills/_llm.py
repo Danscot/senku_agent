@@ -2,54 +2,60 @@
 skills/_llm.py — Shared LLM call helper for all skills.
 
 Centralises:
-  - max_tokens from config
-  - temperature from config
-  - thinking budget injection (when THINKING_ENABLED=True)
-  - <thought> / <think> block stripping from responses
+  - max_tokens and temperature from config
+  - per-provider thinking param injection (NVIDIA, Gemini, Anthropic)
+  - delta.reasoning_content handling (NVIDIA thinking models)
+  - <thought>/<think> block stripping as a safety net
 """
 
 from __future__ import annotations
-import re
-from config import THINKING_ENABLED, THINKING_BUDGET, TEMPERATURE_SKILLS
+from config import TEMPERATURE_SKILLS
 
 
-def skill_llm_call(client, model: str, messages: list[dict], max_tokens: int) -> str:
+def skill_llm_call(
+    client,
+    model: str,
+    messages: list[dict],
+    max_tokens: int,
+    provider: str = "",
+) -> str:
     """
-    Make a streaming LLM call for a skill, accumulate chunks, strip
-    chain-of-thought blocks, and return the clean text.
+    Make a streaming LLM call for a skill and return the clean response text.
+
+    Handles per-provider thinking params and reasoning_content automatically.
+    Strips <thought>/<think> blocks from the final output as a safety net.
 
     Args:
         client:     OpenAI-compatible client
         model:      model name string
         messages:   list of {role, content} dicts
-        max_tokens: token budget (pass the relevant TOKENS_* constant)
+        max_tokens: token budget (use the relevant TOKENS_* constant from config)
+        provider:   provider name string (e.g. "nvidia", "gemini") — used to
+                    select the correct thinking param format. Optional; if omitted
+                    no thinking params are sent.
     """
-    call_kwargs: dict = dict(
+    from agent.thinking import build_thinking_kwargs, extract_chunk, strip_thought_tags
+
+    thinking_kwargs = build_thinking_kwargs(provider, model) if provider else {}
+
+    stream = client.chat.completions.create(
         model=model,
         messages=messages,
         max_tokens=max_tokens,
         temperature=TEMPERATURE_SKILLS,
         stream=True,
+        **thinking_kwargs,
     )
-    if THINKING_ENABLED:
-        call_kwargs["extra_body"] = {
-            "thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}
-        }
 
-    stream = client.chat.completions.create(**call_kwargs)
+    content_chunks:   list[str] = []
+    reasoning_chunks: list[str] = []
 
-    chunks: list[str] = []
     for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
-            chunks.append(delta)
+        content, reasoning = extract_chunk(chunk)
+        if content:
+            content_chunks.append(content)
+        if reasoning:
+            reasoning_chunks.append(reasoning)
 
-    raw = "".join(chunks).strip()
-    return _strip_thought(raw)
-
-
-def _strip_thought(text: str) -> str:
-    """Remove <thought>…</thought> and <think>…</think> blocks."""
-    text = re.sub(r"<thought>.*?</thought>", "", text, flags=re.DOTALL)
-    text = re.sub(r"<think>.*?</think>",    "", text, flags=re.DOTALL)
-    return text.strip()
+    raw = "".join(content_chunks).strip()
+    return strip_thought_tags(raw)

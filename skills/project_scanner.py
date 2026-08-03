@@ -24,7 +24,7 @@ import json
 import time
 import logging
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT, TOKENS_PROJECT_SCANNER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
+from config import MODEL, PROJECT_ROOT, TOKENS_PROJECT_SCANNER, TEMPERATURE_SKILLS
 
 _LOG = logging.getLogger("skill.project_scanner")
 
@@ -184,7 +184,7 @@ def _read_truncated(fpath: Path) -> str:
         return f"# ERROR reading file: {e}"
 
 
-def _analyze_file(fpath: Path, content: str, root: str, client, emit, console, n_str: str, total: int) -> dict:
+def _analyze_file(fpath: Path, content: str, root: str, client, emit, console, n_str: str, total: int, provider: str = "") -> dict:
     """
     Stream the LLM analysis of a single file, printing tokens live as they
     arrive so the user sees activity immediately instead of waiting for the
@@ -226,23 +226,25 @@ If none, return an empty list.
 
     chunks: list[str] = []
     try:
-        call_kwargs: dict = dict(
+        from agent.thinking import build_thinking_kwargs, extract_chunk, strip_thought_tags
+        thinking_kwargs = build_thinking_kwargs(provider, MODEL)
+
+        stream = client.chat.completions.create(
             model=MODEL,
             messages=[{"role": "user", "content": prompt}],
             max_tokens=TOKENS_PROJECT_SCANNER,
             temperature=TEMPERATURE_SKILLS,
             stream=True,
+            **thinking_kwargs,
         )
-        if THINKING_ENABLED:
-            call_kwargs["extra_body"] = {"thinking": {"type": "enabled", "budget_tokens": THINKING_BUDGET}}
-
-        stream = client.chat.completions.create(**call_kwargs)
         for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                chunks.append(delta)
-                # Print each token as it arrives — this is the key change
-                console.print(f"[dim]{delta}[/]", end="")
+            content, reasoning = extract_chunk(chunk)
+            if reasoning:
+                # Show reasoning dimmed — user can see the model thinking per-file
+                console.print(f"[dim]{reasoning}[/]", end="")
+            if content:
+                chunks.append(content)
+                console.print(f"[dim]{content}[/]", end="")
 
         # Move to a new line after the stream finishes
         console.print()
@@ -385,6 +387,7 @@ def run(params: dict, client) -> str:
     root         = params.get("root", PROJECT_ROOT)
     output_path  = params.get("output", os.path.join(root, "structure.md"))
     project_name = params.get("name", Path(root).name)
+    provider     = params.get("provider", "")
 
     if not os.path.isdir(root):
         return f"ERROR: project root '{root}' does not exist."
@@ -439,7 +442,7 @@ def run(params: dict, client) -> str:
     for fpath in files:
         content = _read_truncated(fpath)
         n_str   = str(len(results) + 1).rjust(pad)
-        info    = _analyze_file(fpath, content, root, client, emit, console, n_str, total)
+        info    = _analyze_file(fpath, content, root, client, emit, console, n_str, total, provider)
         results.append(info)
 
     total_elapsed = time.monotonic() - t_scan_start

@@ -13,7 +13,7 @@ import subprocess
 import sys
 import os
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT, TOKENS_TEST_RUNNER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
+from config import MODEL, PROJECT_ROOT, TOKENS_TEST_RUNNER, TEMPERATURE_SKILLS
 
 
 def _safe_extract(resp, default="") -> str:
@@ -161,6 +161,7 @@ Provide:
             client, MODEL,
             [{"role": "user", "content": prompt}],
             max_tokens=TOKENS_TEST_RUNNER,
+            provider=params.get("provider", ""),
         )
     except Exception as e:
         analysis = f"(LLM analysis failed: {e})"

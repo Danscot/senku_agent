@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT, TOKENS_CODE_WRITER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
+from config import MODEL, PROJECT_ROOT, TOKENS_CODE_WRITER, TEMPERATURE_SKILLS
 
 
 def _safe_extract(resp, default="") -> str:
@@ -146,6 +146,7 @@ Return the COMPLETE updated file content inside a fenced ```{lang}``` block.
             client, MODEL,
             [{"role": "system", "content": system}, {"role": "user", "content": user_prompt}],
             max_tokens=TOKENS_CODE_WRITER,
+            provider=params.get("provider", ""),
         )
     except Exception as e:
         return f"ERROR: LLM call failed — {e}"

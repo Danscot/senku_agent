@@ -14,7 +14,7 @@ import sys
 import json
 import os
 from pathlib import Path
-from config import MODEL, PROJECT_ROOT, TOKENS_DEPENDENCY_RESOLVER, TEMPERATURE_SKILLS, THINKING_ENABLED, THINKING_BUDGET
+from config import MODEL, PROJECT_ROOT, TOKENS_DEPENDENCY_RESOLVER, TEMPERATURE_SKILLS
 
 
 def _safe_extract(resp, default="") -> str:
@@ -126,6 +126,7 @@ These packages are outdated in the project. Which ones should be updated urgentl
                     client, MODEL,
                     [{"role": "user", "content": prompt}],
                     max_tokens=TOKENS_DEPENDENCY_RESOLVER,
+                    provider=params.get("provider", ""),
                 )
                 return f"## Outdated packages\n\n```\n{out}\n```\n\n## Upgrade priority\n\n{advice}"
             except Exception:
