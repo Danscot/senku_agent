@@ -28,6 +28,74 @@ from config import MODEL, PROJECT_ROOT, TOKENS_PROJECT_SCANNER, TEMPERATURE_SKIL
 
 _LOG = logging.getLogger("skill.project_scanner")
 
+
+# ── API rate limiter ───────────────────────────────────────────────────────────
+
+class _RateLimiter:
+    """
+    Sliding-window rate limiter for LLM API calls.
+
+    Tracks the timestamp of every call made. Before each call, if the number
+    of calls in the last `window_seconds` has reached `max_calls`, it sleeps
+    until the oldest call falls outside the window — then proceeds.
+
+    Shows a live countdown in the terminal so the user knows what's happening.
+
+    Args:
+        max_calls:       max calls allowed per window (default: 10)
+        window_seconds:  rolling window size in seconds (default: 60)
+    """
+
+    def __init__(self, max_calls: int = 10, window_seconds: float = 60.0):
+        self.max_calls      = max_calls
+        self.window_seconds = window_seconds
+        self._timestamps: list[float] = []
+
+    def wait(self, console) -> None:
+        """
+        Block until a call slot is available. Shows a countdown if waiting.
+        Call this immediately before each LLM request.
+        """
+        now = time.monotonic()
+
+        # Evict timestamps older than the window
+        cutoff = now - self.window_seconds
+        self._timestamps = [t for t in self._timestamps if t > cutoff]
+
+        if len(self._timestamps) < self.max_calls:
+            # Slot available — record and proceed
+            self._timestamps.append(now)
+            return
+
+        # Slot full — wait until the oldest timestamp leaves the window
+        oldest   = self._timestamps[0]
+        wait_for = (oldest + self.window_seconds) - now
+
+        _LOG.info(f"[RATE LIMIT] {self.max_calls} calls in {self.window_seconds}s — waiting {wait_for:.1f}s")
+
+        # Live countdown display
+        deadline = time.monotonic() + wait_for
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            m, s = divmod(int(remaining) + 1, 60)
+            console.print(
+                f"  [bold yellow]⏳[/]  [dim]API rate limit ({self.max_calls} calls/{int(self.window_seconds)}s) — "
+                f"cooldown [bold white]{m:02d}:{s:02d}[/][/]",
+                end="\r",
+            )
+            time.sleep(min(1.0, remaining))
+
+        # Clear the countdown line
+        console.print(" " * 72, end="\r")
+
+        # Slot now available
+        now = time.monotonic()
+        cutoff = now - self.window_seconds
+        self._timestamps = [t for t in self._timestamps if t > cutoff]
+        self._timestamps.append(now)
+
 # ── File extensions we care about ─────────────────────────────────────────────
 _CODE_EXTS = {
     ".py", ".js", ".ts", ".jsx", ".tsx",
@@ -184,7 +252,7 @@ def _read_truncated(fpath: Path) -> str:
         return f"# ERROR reading file: {e}"
 
 
-def _analyze_file(fpath: Path, content: str, root: str, client, emit, console, n_str: str, total: int, provider: str = "") -> dict:
+def _analyze_file(fpath: Path, content: str, root: str, client, emit, console, n_str: str, total: int, provider: str = "", rate_limiter: "_RateLimiter | None" = None) -> dict:
     """
     Stream the LLM analysis of a single file, printing tokens live as they
     arrive so the user sees activity immediately instead of waiting for the
@@ -223,6 +291,10 @@ If none, return an empty list.
     )
     # Print the streaming prefix on the same indentation, then stream inline
     console.print("       [dim]↳ [/]", end="")
+
+    # Honour rate limit before making the LLM call
+    if rate_limiter is not None:
+        rate_limiter.wait(console)
 
     chunks: list[str] = []
     try:
@@ -389,6 +461,12 @@ def run(params: dict, client) -> str:
     project_name = params.get("name", Path(root).name)
     provider     = params.get("provider", "")
 
+    # Rate limiting — configurable via params or falls back to config default
+    # Google Gemini free tier: 10 RPM. Set rpm=0 to disable.
+    from config import SCANNER_RATE_LIMIT_RPM
+    rpm = int(params.get("rpm", SCANNER_RATE_LIMIT_RPM))
+    rate_limiter = _RateLimiter(max_calls=rpm, window_seconds=60.0) if rpm > 0 else None
+
     if not os.path.isdir(root):
         return f"ERROR: project root '{root}' does not exist."
 
@@ -442,7 +520,7 @@ def run(params: dict, client) -> str:
     for fpath in files:
         content = _read_truncated(fpath)
         n_str   = str(len(results) + 1).rjust(pad)
-        info    = _analyze_file(fpath, content, root, client, emit, console, n_str, total, provider)
+        info    = _analyze_file(fpath, content, root, client, emit, console, n_str, total, provider, rate_limiter)
         results.append(info)
 
     total_elapsed = time.monotonic() - t_scan_start

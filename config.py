@@ -149,6 +149,16 @@ TEMPERATURE_SKILLS:  float = float(os.getenv("TEMPERATURE_SKILLS",  "0.2"))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
+#  SCANNER RATE LIMITING
+#  Max LLM calls per 60-second window during project scanning.
+#  Google Gemini free tier: 10 RPM. Set to 0 to disable entirely.
+#  NVIDIA / OpenAI have higher limits — set higher or 0 there.
+# ════════════════════════════════════════════════════════════════════════════════
+
+SCANNER_RATE_LIMIT_RPM: int = int(os.getenv("SCANNER_RATE_LIMIT_RPM", "10"))
+
+
+# ════════════════════════════════════════════════════════════════════════════════
 #  PROJECT ROOT
 # ════════════════════════════════════════════════════════════════════════════════
 
