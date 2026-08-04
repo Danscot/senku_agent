@@ -6,6 +6,7 @@ Coding-agent skill registry.
 from .project_scanner    import SKILL_DEF as SCANNER_DEF
 from .code_writer        import SKILL_DEF as WRITER_DEF
 from .code_reviewer      import SKILL_DEF as REVIEWER_DEF
+from .code_surgeon       import SKILL_DEF as SURGEON_DEF
 from .test_runner        import SKILL_DEF as TEST_RUNNER_DEF
 from .dependency_resolver import SKILL_DEF as DEP_DEF
 
@@ -18,6 +19,7 @@ def _register(skill_def: dict):
 
 _register(SCANNER_DEF)
 _register(WRITER_DEF)
+_register(SURGEON_DEF)
 _register(REVIEWER_DEF)
 _register(TEST_RUNNER_DEF)
 _register(DEP_DEF)

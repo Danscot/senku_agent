@@ -281,13 +281,53 @@ DJANGO TOOL OPERATIONS (op param values):
   check        — django system check:         params {{"op":"check"}}
   install      — pip install django+deps:     params {{"op":"install"}}
 
+CODE SURGEON OPERATIONS — use for ALL edits to existing files:
+  edit_function  — rewrite a named function:
+      {{"op":"edit_function","path":"app/views.py","symbol":"my_view","instruction":"add pagination support"}}
+  edit_method    — rewrite a method inside a class:
+      {{"op":"edit_method","path":"app/models.py","symbol":"save","class_name":"UserProfile","instruction":"hash password before saving"}}
+  edit_class     — rewrite a class definition:
+      {{"op":"edit_class","path":"app/models.py","symbol":"Order","instruction":"add status field"}}
+  insert_after   — insert new code after a symbol:
+      {{"op":"insert_after","path":"app/views.py","symbol":"index_view","instruction":"add about_view function"}}
+  insert_before  — insert new code before a symbol:
+      {{"op":"insert_before","path":"app/views.py","symbol":"index_view","instruction":"add auth decorator"}}
+  delete_symbol  — delete a function/class entirely:
+      {{"op":"delete_symbol","path":"app/views.py","symbol":"old_view"}}
+  edit_lines     — edit an explicit line range:
+      {{"op":"edit_lines","path":"app/views.py","start_line":42,"end_line":55,"instruction":"fix the SQL query"}}
+  add_import     — add an import at the top:
+      {{"op":"add_import","path":"app/views.py","import_stmt":"from django.contrib.auth.decorators import login_required"}}
+  edit_html_tag  — rewrite an HTML element by id or tag.class:
+      {{"op":"edit_html_tag","path":"templates/index.html","selector":"#hero","instruction":"modernise the hero section"}}
+  replace_text   — literal find-and-replace, NO LLM (fastest — use for simple string swaps):
+      {{"op":"replace_text","path":"tts.py","old_text":"script.txt","new_text":"info.txt"}}
+      Use this whenever you just need to swap a string — filename, constant, URL, etc.
+
 CODING-SPECIFIC RULES:
   - ALWAYS check structure.md before editing files
-  - For new Django projects: scaffold first, then startapp, then migrate
-  - For frontend changes: check if there's a base template first
-  - For bug fixes: review the file first (skill:code_reviewer), then edit (skill:code_writer)
-  - After editing Python files: run tests if a test file exists (skill:test_runner)
-  - Prefer skill:code_writer over tool:file for writing code
+
+  EDITING EXISTING FILES — use skill:code_surgeon (NOT code_writer):
+    ✔ Fix a bug in a function     → op=edit_function, symbol=<name>
+    ✔ Change a method in a class  → op=edit_method,   symbol=<method>, class_name=<class>
+    ✔ Add CSS to a rule block     → op=edit_css_rule,  selector=<selector>
+    ✔ Update an HTML section      → op=edit_html_tag,  selector=<#id or tag.class>
+    ✔ Add a new function below    → op=insert_after,   symbol=<anchor_function>
+    ✔ Remove dead code            → op=delete_symbol,  symbol=<name>
+    ✔ Edit specific lines         → op=edit_lines,     start_line=N, end_line=M
+    ✔ Add an import               → op=add_import,     import_stmt="from x import y"
+    ✗ NEVER use code_writer to edit an existing file — it rewrites the whole file
+
+  CREATING NEW FILES — use skill:code_writer:
+    ✔ Brand new file that doesn't exist yet → mode=create
+    ✔ Scaffolding a new module from scratch → mode=create
+    ✗ Do NOT use code_writer on files that already exist
+
+  OTHER RULES:
+  - For Django: scaffold first, then startapp, then migrate
+  - For bug fixes: review first (skill:code_reviewer), then edit (skill:code_surgeon)
+  - After editing Python: run tests if a test file exists (skill:test_runner)
+  - Prefer skill:code_surgeon over tool:file for all edits to existing code
 
 ASK TOOL — mid-execution questions:
   Use tool:ask as a PLAN STEP when you hit a genuine decision point mid-task:
@@ -332,8 +372,8 @@ def _step_writes_files(tool_key: str, params: dict) -> bool:
     """Return True if this step likely wrote new files to disk."""
     key = tool_key.strip()
 
-    # skill:code_writer always writes
-    if key == "skill:code_writer":
+    # skill:code_writer always writes; code_surgeon always edits (both touch disk)
+    if key in ("skill:code_writer", "skill:code_surgeon"):
         return True
 
     # tool:file with op=write/create
@@ -756,7 +796,7 @@ class Agent:
     def _dispatch_raw(self, tool_key: str, params: dict) -> Any:
         # Skills that do their own rich streaming output must not be wrapped
         # in live_task — the Live context would fight with their console prints.
-        _NO_LIVE_TIMER = {"project_scanner", "code_writer"}
+        _NO_LIVE_TIMER = {"project_scanner", "code_writer", "code_surgeon"}
         skill_name = tool_key[len("skill:"):] if tool_key.startswith("skill:") else ""
         use_timer  = skill_name not in _NO_LIVE_TIMER
 
@@ -929,23 +969,108 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
             for i, r in step_results.items()
         )
 
-        failure_note = ""
-        if failed_steps:
-            failure_note = (
-                "\n\nNOTE: The following steps had issues:\n" +
-                "\n".join(f"  - {f}" for f in failed_steps) +
-                "\nExplain what went wrong and what the user should do next."
+        # ── If all steps passed, respond normally ─────────────────────────
+        if not failed_steps:
+            with stage_block("RESPOND"):
+                answer = self._llm_respond([
+                    {"role": "system",    "content": "You are a coding agent. Write a clear, complete final answer."},
+                    {"role": "user",      "content": user_input},
+                    {"role": "assistant", "content": f"Completed steps:\n{results_block}"},
+                    {"role": "user",      "content": "Give your final answer."},
+                ])
+                log_stage_done("respond", chars=len(answer), failed_steps=0)
+            return answer
+
+        # ── Some steps failed — ask the LLM if it can recover ────────────
+        failed_summary = "\n".join(f"  - {f}" for f in failed_steps)
+        console.print(
+            f"\n  [bold yellow]⚠[/]  [{C['muted']}]{len(failed_steps)} step(s) failed — "
+            f"asking agent to recover…[/]\n"
+        )
+
+        recovery_prompt = f"""\
+The following steps in your plan failed:
+{failed_summary}
+
+Completed step results so far:
+{results_block}
+
+Can you recover and complete the task, or do you need clarification from the user?
+
+Respond in JSON only:
+{{
+  "can_recover": true | false,
+  "recovery_steps": [   // list of NEW steps to fix what failed (empty if can_recover=false)
+    {{"id":1,"tool":"...","description":"...","params":{{}}}}
+  ],
+  "question": "..."     // question to ask the user (only if can_recover=false)
+}}
+"""
+        raw = self._llm_think([
+            {"role": "system", "content": self._think_system},
+            {"role": "user",   "content": user_input},
+            {"role": "assistant", "content": recovery_prompt},
+        ])
+        recovery = _extract_json(raw) or {}
+
+        if recovery.get("can_recover") and recovery.get("recovery_steps"):
+            # Run the recovery steps
+            console.print(f"  [bold green]↻[/]  [dim]Attempting recovery…[/]\n")
+            recovery_results: dict[int, str] = {}
+            recovery_failed: list[str] = []
+
+            for step in recovery.get("recovery_steps", []):
+                show_step_start(step)
+                rparams   = self._resolve_params(step.get("params", {}), {**step_results, **recovery_results})
+                rtool_key = step["tool"]
+                show_tool_call(rtool_key, rparams)
+                rresult = self._dispatch(rtool_key, rparams)
+                is_err  = isinstance(rresult, str) and rresult.startswith("ERROR")
+                show_step_result(str(rresult), error=is_err)
+                if is_err:
+                    recovery_failed.append(f"Step {step['id']}: {str(rresult)[:200]}")
+                elif _step_writes_files(rtool_key, rparams):
+                    try:
+                        _update_structure_md(self.project_root)
+                        self._rebuild_think_system()
+                    except Exception:
+                        pass
+                recovery_results[step["id"]] = str(rresult)
+
+            all_results = {**step_results, **recovery_results}
+            all_block   = "\n\n".join(
+                f"Step {i}: {r[:600]}" for i, r in all_results.items()
+            )
+            still_failed = failed_steps + recovery_failed
+            still_note   = (
+                f"\n\nNOTE — these steps still failed after recovery:\n{chr(10).join(still_failed)}"
+                if recovery_failed else ""
             )
 
-        with stage_block("RESPOND"):
-            answer = self._llm_respond([
-                {"role": "system",    "content": "You are a coding agent. Write a clear, complete final answer."},
-                {"role": "user",      "content": user_input},
-                {"role": "assistant", "content": f"Completed steps:\n{results_block}{failure_note}"},
-                {"role": "user",      "content": "Give your final answer."},
-            ])
-            log_stage_done("respond", chars=len(answer), failed_steps=len(failed_steps))
-        return answer
+            with stage_block("RESPOND"):
+                answer = self._llm_respond([
+                    {"role": "system",    "content": "You are a coding agent. Write a clear, complete final answer."},
+                    {"role": "user",      "content": user_input},
+                    {"role": "assistant", "content": f"All step results:\n{all_block}{still_note}"},
+                    {"role": "user",      "content": "Give your final answer."},
+                ])
+                log_stage_done("respond", chars=len(answer), failed_steps=len(recovery_failed))
+            return answer
+
+        else:
+            # Cannot recover — ask the user
+            question = recovery.get(
+                "question",
+                f"I completed some steps but {len(failed_steps)} failed. "
+                f"Would you like me to retry, or can you clarify what went wrong?\n\n"
+                f"Failed steps:\n{failed_summary}"
+            )
+            from ui import show_clarify
+            show_clarify(
+                f"{len(failed_steps)} step(s) could not be completed automatically.",
+                [{"id": 1, "question": question, "options": ["Retry", "Skip", "Tell me more"]}],
+            )
+            return question
 
     def _handle_clarify(self, think: dict) -> str:
         """
