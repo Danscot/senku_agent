@@ -323,8 +323,17 @@ CODING-SPECIFIC RULES:
     ✔ Scaffolding a new module from scratch → mode=create
     ✗ Do NOT use code_writer on files that already exist
 
-  OTHER RULES:
-  - For Django: scaffold first, then startapp, then migrate
+  WEB RESEARCH:
+  - Use skill:web_crawler over tool:search when you need full page content:
+    ✔ Reading documentation, API references, changelogs → op=scrape, url=<url>
+    ✔ Researching a topic with full article content    → op=search, query=<q>
+    ✔ Crawling a whole docs site                       → op=crawl,  url=<base_url>, limit=10
+    ✔ Extracting structured data from a page           → op=extract, url=<url>, prompt=<what>
+  - Use tool:search only for quick lookups where snippets are enough
+  - CHUNKED CONTENT RULE — when a response header says "N more chunk(s) remaining":
+    YOU MUST read ALL chunks before writing any report or summary.
+    Add extra scrape steps with chunk_index=1, chunk_index=2, etc. until you see "FINAL CHUNK".
+    Writing a report from partial content is a critical failure.
   - For bug fixes: review first (skill:code_reviewer), then edit (skill:code_surgeon)
   - After editing Python: run tests if a test file exists (skill:test_runner)
   - Prefer skill:code_surgeon over tool:file for all edits to existing code

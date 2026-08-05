@@ -31,6 +31,7 @@ ANTHROPIC_API_KEY:  str = os.getenv("ANTHROPIC_API_KEY",  "")
 OPENROUTER_API_KEY: str = os.getenv("OPENROUTER_API_KEY", "")
 CUSTOM_API_KEY:     str = os.getenv("CUSTOM_API_KEY",     "")
 CUSTOM_BASE_URL:    str = os.getenv("CUSTOM_BASE_URL",    "")
+FIRECRAWL_API_KEY:  str = os.getenv("FIRECRAWL_API_KEY",  "")
 
 
 # ════════════════════════════════════════════════════════════════════════════════
