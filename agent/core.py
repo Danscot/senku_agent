@@ -330,10 +330,12 @@ CODING-SPECIFIC RULES:
     ✔ Crawling a whole docs site                       → op=crawl,  url=<base_url>, limit=10
     ✔ Extracting structured data from a page           → op=extract, url=<url>, prompt=<what>
   - Use tool:search only for quick lookups where snippets are enough
-  - CHUNKED CONTENT RULE — when a response header says "N more chunk(s) remaining":
-    YOU MUST read ALL chunks before writing any report or summary.
-    Add extra scrape steps with chunk_index=1, chunk_index=2, etc. until you see "FINAL CHUNK".
-    Writing a report from partial content is a critical failure.
+  - CHUNKED CONTENT: chunks are auto-fetched — you will always receive the complete content.
+    Do NOT add extra scrape steps for chunk_index — this is handled automatically.
+  - SAVING FETCHED CONTENT: use tool:file with op=write and content={{step_N}} to save
+    raw fetched content directly to disk. Do NOT use skill:code_writer for this —
+    code_writer calls an LLM which wastes time and may paraphrase the content.
+    Example: {{"op":"write","path":"page.md","content":"{{step_1}}"}}
   - For bug fixes: review first (skill:code_reviewer), then edit (skill:code_surgeon)
   - After editing Python: run tests if a test file exists (skill:test_runner)
   - Prefer skill:code_surgeon over tool:file for all edits to existing code
@@ -599,7 +601,14 @@ class Agent:
 
                 # Strip any leftover thought tags folded into content
                 raw = lcl.finish()
-                return strip_thought_tags(raw)
+                cleaned = strip_thought_tags(raw)
+                # If stripping thought tags left nothing, the model only produced
+                # chain-of-thought with no actual answer — retry without echo
+                # using a tighter prompt to force a real response.
+                if not cleaned.strip() and raw.strip():
+                    log_warning("Respond stage returned thought-only output — retrying for actual answer")
+                    return cleaned  # caller will see empty and can handle
+                return cleaned
 
             except Exception as exc:
                 return lcl.finish(error=str(exc))
@@ -680,7 +689,7 @@ class Agent:
                     if ph_line in v:
                         line1 = next((l.strip() for l in result.splitlines() if l.strip()), result[:200])
                         v = v.replace(ph_line, line1)
-                    if ph_full in v: v = v.replace(ph_full, result[:1500])
+                    if ph_full in v: v = v.replace(ph_full, result)  # no cap — full content
             resolved[k] = v
         return resolved
 
@@ -894,6 +903,28 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
 
     # ── Mode handlers ──────────────────────────────────────────────────────────
 
+    def _safe_respond(self, messages: list[dict]) -> str:
+        """
+        Call _llm_respond and retry once with a simplified prompt if the model
+        returns an empty string (typically caused by a thought-only response
+        where strip_thought_tags() removes all content).
+        """
+        result = self._llm_respond(messages)
+        if result.strip():
+            return result
+
+        log_warning("Respond returned empty — retrying with simplified prompt")
+        # Append a direct nudge so the model produces actual text
+        retry_messages = messages + [{
+            "role": "user",
+            "content": (
+                "Please give your answer now as plain text. "
+                "Do not use <thought> tags — just respond directly."
+            )
+        }]
+        result = self._llm_respond(retry_messages)
+        return result if result.strip() else "(No response generated)"
+
     def _handle_chat(self, user_input: str) -> str:
         structure_md = _load_structure_md(self.project_root)
         system = (
@@ -908,7 +939,7 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
         messages.append({"role": "user", "content": user_input})
 
         with stage_block("RESPOND", input_text=user_input):
-            result = self._llm_respond(messages)
+            result = self._safe_respond(messages)
             log_stage_done("respond", chars=len(result))
         return result
 
@@ -921,11 +952,13 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
 
         show_tool_call(tool_key, params)
         result = self._dispatch(tool_key, params)
+        if not (isinstance(result, str) and result.startswith("ERROR")):
+            result = self._drain_chunks(tool_key, params, str(result))
         is_err = isinstance(result, str) and result.startswith("ERROR")
         show_step_result(str(result), error=is_err)
 
         with stage_block("RESPOND"):
-            answer = self._llm_respond([
+            answer = self._safe_respond([
                 {"role": "system",    "content": "You are a coding agent. Answer naturally using the tool result. Be concise and technical."},
                 {"role": "user",      "content": user_input},
                 {"role": "assistant", "content": f"Tool result:\n{str(result)[:2000]}"},
@@ -933,6 +966,73 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
             ])
             log_stage_done("respond", chars=len(answer))
         return answer
+
+    def _detect_chunks(self, result: str) -> tuple[bool, int, int]:
+        """
+        Parse the chunk header emitted by file_tool and web_crawler.
+        Returns (has_more, next_chunk_index, total_chunks).
+        Header format: [... | chunk N/M | K more chunk(s) remaining — call ... with chunk_index=N]
+        """
+        import re
+        m = re.search(r"chunk (\d+)/(\d+)", result)
+        if not m:
+            return False, 0, 0
+        current  = int(m.group(1))
+        total    = int(m.group(2))
+        has_more = current < total
+        return has_more, current, total   # next index = current (0-based)
+
+    def _drain_chunks(
+        self,
+        tool_key:     str,
+        params:       dict,
+        first_result: str,
+    ) -> str:
+        """
+        If first_result contains a chunked-content header, automatically fetch
+        all remaining chunks and concatenate them before returning.
+        No LLM involved — pure tool calls.
+        """
+        has_more, next_index, total = self._detect_chunks(first_result)
+        if not has_more:
+            return first_result
+
+        console.print(
+            f"  [bold cyan]⟳[/]  [dim]Chunked content detected — auto-fetching "
+            f"{total - next_index} remaining chunk(s)…[/]"
+        )
+
+        accumulated = first_result
+        current_index = next_index   # next_index is already 1-based chunk number = 0-based index to fetch
+
+        while has_more:
+            chunk_params = {**params, "chunk_index": current_index}
+            console.print(
+                f"  [dim cyan]  ↳ chunk {current_index + 1}/{total}[/]",
+                end=" ",
+            )
+            chunk_result = self._dispatch(tool_key, chunk_params)
+
+            if isinstance(chunk_result, str) and chunk_result.startswith("ERROR"):
+                console.print(f"[bold red]✖ {chunk_result[:80]}[/]")
+                log_error(f"Chunk fetch failed at index {current_index}: {chunk_result[:200]}")
+                break
+
+            console.print(f"[dim]({len(chunk_result)} chars)[/]")
+
+            # Strip the header from subsequent chunks — keep content only
+            import re
+            content_only = re.sub(r"^\[.*?\]\n\n", "", chunk_result, count=1, flags=re.DOTALL)
+            accumulated += "\n" + content_only
+
+            has_more, _, _ = self._detect_chunks(chunk_result)
+            current_index += 1
+
+        console.print(
+            f"  [bold green]✔[/]  [dim]All chunks collected — "
+            f"{len(accumulated):,} total chars[/]\n"
+        )
+        return accumulated
 
     def _handle_plan(self, user_input: str, think: dict) -> str:
         steps = think.get("steps", [])
@@ -952,6 +1052,11 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
 
             show_tool_call(tool_key, params)
             result = self._dispatch(tool_key, params)
+
+            # Auto-drain chunked responses before any downstream step sees them
+            if not (isinstance(result, str) and result.startswith("ERROR")):
+                result = self._drain_chunks(tool_key, params, str(result))
+
             is_err = isinstance(result, str) and result.startswith("ERROR")
             show_step_result(str(result), error=is_err)
 
@@ -981,7 +1086,7 @@ If you cannot determine a fix, return: {{"params": null, "explanation": "cannot 
         # ── If all steps passed, respond normally ─────────────────────────
         if not failed_steps:
             with stage_block("RESPOND"):
-                answer = self._llm_respond([
+                answer = self._safe_respond([
                     {"role": "system",    "content": "You are a coding agent. Write a clear, complete final answer."},
                     {"role": "user",      "content": user_input},
                     {"role": "assistant", "content": f"Completed steps:\n{results_block}"},
@@ -1057,7 +1162,7 @@ Respond in JSON only:
             )
 
             with stage_block("RESPOND"):
-                answer = self._llm_respond([
+                answer = self._safe_respond([
                     {"role": "system",    "content": "You are a coding agent. Write a clear, complete final answer."},
                     {"role": "user",      "content": user_input},
                     {"role": "assistant", "content": f"All step results:\n{all_block}{still_note}"},
