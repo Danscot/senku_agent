@@ -9,6 +9,7 @@ from .code_reviewer      import SKILL_DEF as REVIEWER_DEF
 from .code_surgeon       import SKILL_DEF as SURGEON_DEF
 from .test_runner        import SKILL_DEF as TEST_RUNNER_DEF
 from .dependency_resolver import SKILL_DEF as DEP_DEF
+from .web_crawler        import SKILL_DEF as CRAWLER_DEF
 
 REGISTRY: dict[str, dict] = {}
 
@@ -23,6 +24,7 @@ _register(SURGEON_DEF)
 _register(REVIEWER_DEF)
 _register(TEST_RUNNER_DEF)
 _register(DEP_DEF)
+_register(CRAWLER_DEF)
 
 # ── Auto-load learned skills ───────────────────────────────────────────────────
 import importlib.util
