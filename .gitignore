@@ -8,6 +8,7 @@ kanzai.zip
 *.so
 kaizen.zip
 agent.zip
+src/
 
 # Distribution / packaging
 .Python
